@@ -24,9 +24,9 @@ STATUS_FR = {"TRADE": "Positif dans les deux périodes, t-score suffisant, assez
 
 def _fig(fig, key):
     try:
-        st.plotly_chart(fig, width="stretch", key=key, config={"displaylogo": False, "scrollZoom": True})
+        st.plotly_chart(fig, width="stretch", key=key, theme=None, config={"displaylogo": False, "scrollZoom": True})
     except TypeError:
-        st.plotly_chart(fig, use_container_width=True, key=key)
+        st.plotly_chart(fig, use_container_width=True, key=key, theme=None)
 
 
 def _df(d, **kw):

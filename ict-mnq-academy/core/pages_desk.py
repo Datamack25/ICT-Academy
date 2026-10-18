@@ -12,6 +12,14 @@ from .mmm import analyze_mmm
 from .style import card, pill
 
 LIVE_MODE = "Live différé (Yahoo ~10-15 min)"
+ORDER_PAGE = "🎯 PASSER UN ORDRE (compte fictif)"
+
+
+def _go_order():
+    st.session_state["nav"] = ORDER_PAGE
+    st.session_state.page = ORDER_PAGE
+    st.session_state.mode = LIVE_MODE
+    st.session_state["mode_radio"] = LIVE_MODE
 STATUS_KIND = {"TRADE": "green", "WATCH": "orange", "DON'T TRADE": "red"}
 
 
@@ -24,9 +32,9 @@ def _df(d, **kw):
 
 def _fig(f, key):
     try:
-        st.plotly_chart(f, width="stretch", key=key, config={"scrollZoom": True, "displaylogo": False})
+        st.plotly_chart(f, width="stretch", key=key, theme=None, config={"scrollZoom": True, "displaylogo": False})
     except TypeError:
-        st.plotly_chart(f, use_container_width=True, key=key, config={"scrollZoom": True, "displaylogo": False})
+        st.plotly_chart(f, use_container_width=True, key=key, theme=None, config={"scrollZoom": True, "displaylogo": False})
 
 
 def _to_15m(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
@@ -60,10 +68,11 @@ def _warnings():
 
 def render_desk(df_full: pd.DataFrame, src_label: str, show: dict, window: int, analyze_ict=None):
     ss = st.session_state
-    st.title("🖥️ Edge Desk — poste de pilotage MNQ")
+    st.title("🔴 Trader en direct — signaux live MNQ")
     st.caption("Mêmes règles que l'indicateur TradingView « Edge 5 Desk » (onglet Scripts) : 5 setups ICT × MMM, ½ sortie, "
                "stop ramené à l'entrée, gate MMPD 27, sessions Asie + NY AM, 2 positions max, coût 1 pt par trade.")
     _warnings()
+    st.button("🎯 Passer un ordre manuel sur le graphique live (compte fictif)", on_click=_go_order)
 
     with st.expander("⚙️ Réglages du desk", expanded=False):
         c = st.columns(4)
@@ -80,7 +89,7 @@ def render_desk(df_full: pd.DataFrame, src_label: str, show: dict, window: int, 
         target = c[3].number_input("Objectif évaluation prop ($)", 500.0, 20000.0, 3000.0, 250.0, key="desk_target")
         dd = c[3].number_input("Drawdown suiveur ($)", 500.0, 10000.0, 2500.0, 250.0, key="desk_dd")
         news = st.text_input("Jours à ignorer (CPI, NFP, FOMC…) — dates AAAA-MM-JJ séparées par des virgules", key="desk_news")
-        auto = st.checkbox("Rafraîchir automatiquement toutes les 60 s (source Yahoo)", False, key="desk_auto")
+        auto = False  # le rafraîchissement live est géré globalement (barre latérale « Live auto »)
     cfg = edge.Config(enabled=tuple(enabled), half_out=half, gate=gate, use_daily=dly, use_h1=h1, sessions=sess,
                       max_open=int(maxo), cost_pts=float(cost), contracts=int(qty),
                       skip_dates=tuple(x.strip() for x in news.split(",") if x.strip()))
@@ -137,7 +146,7 @@ def render_desk(df_full: pd.DataFrame, src_label: str, show: dict, window: int, 
                              Trades=r["trades"], WR=f"{r['WR']:.0f} %", avg_RR=f"{r['avg_RR_ancien']:+.2f} → {r['avg_RR_récent']:+.2f}",
                              PF=round(r["PF"], 2), t=round(r["t"], 2) if not np.isnan(r["t"]) else None,
                              worst_run_R=round(r["worst_run_R"], 1), Verdict=edge.verdict(r)))
-        _df(pd.DataFrame(rows).astype(object).where(pd.DataFrame(rows).notna(), "—"), hide_index=True)
+        _df(pd.DataFrame(rows).astype(object).where(pd.DataFrame(rows).notna(), "—").astype(str), hide_index=True)
         st.caption("WR = trades gagnants · avg RR ancien (70 % des trades) → récent (30 %) après coûts · worst run = pire drawdown en R · "
                    "TRADE = ≥ 30 trades, positif ancien ET récent, t ≥ 2,5.")
 
@@ -146,7 +155,7 @@ def render_desk(df_full: pd.DataFrame, src_label: str, show: dict, window: int, 
         if pt.empty:
             st.info("Pas encore de trades sur cet historique.")
         else:
-            pt = pt.astype(object).where(pt.notna(), "—")
+            pt = pt.astype(object).where(pt.notna(), "—").astype(str)
             _df(pt.rename(columns={"pass_you": f"pass @ {int(qty)} MNQ", "jours_médians": "jours (médiane)",
                                    "meilleure_taille": "meilleure taille", "pass_meilleure": "pass @ meilleure"}), hide_index=True)
             st.caption("Une évaluation démarre à chaque trade de l'historique et rejoue la suite réelle jusqu'à l'objectif (✓) ou au "

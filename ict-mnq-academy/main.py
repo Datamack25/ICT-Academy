@@ -18,12 +18,13 @@ from core.content import CHEATSHEET_HTML, FIGURES, QUIZ, STUDY_STEPS
 from core.data import (NY_TZ, PERIOD_CHOICES, csv_to_ohlc, demo_data, detect_csv_kind, load_market,
                        load_yahoo, read_csv_any)
 from core.ict import analyze, describe_trend, killzone
-from core.style import apply_theme, card, pill
+from core.style import apply_theme, card, live_bar, pill
+import time as _time
 
 st.set_page_config(page_title="ICT MNQ Academy", page_icon="📈", layout="wide")
 apply_theme()
 
-PAGES = ["🏠 Accueil", "🖥️ Edge Desk (live)", "🎯 Simulateur MNQ", "📒 Journal & Coach", "📊 Backtests & Verdicts", "🤖 Agent expert",
+PAGES = ["🏠 Accueil", "🔴 TRADER EN DIRECT (signaux live)", "🎯 PASSER UN ORDRE (compte fictif)", "📒 Journal & Coach", "📊 Backtests & Verdicts", "🤖 Agent expert",
          "📚 Figures ICT", "🧭 Méthode d'étude", "📜 Scripts TradingView", "⚙️ Mode d'emploi"]
 SETUPS = ["Méthode C — sweep + MSS + OB/OTE", "Breaker strategy", "Méthode A — OB courant",
           "Méthode B — OB + OTE 0.705", "FVG (ICT 2022 / Silver Bullet)", "Range / déviation + MSB",
@@ -33,9 +34,9 @@ SETUPS = ["Méthode C — sweep + MSS + OB/OTE", "Breaker strategy", "Méthode A
 # ------------------------------------------------------------------ helpers
 def show_fig(fig, key=None):
     try:
-        st.plotly_chart(fig, width="stretch", key=key, config={"scrollZoom": True, "displaylogo": False})
+        st.plotly_chart(fig, width="stretch", key=key, theme=None, config={"scrollZoom": True, "displaylogo": False})
     except TypeError:
-        st.plotly_chart(fig, use_container_width=True, key=key, config={"scrollZoom": True, "displaylogo": False})
+        st.plotly_chart(fig, use_container_width=True, key=key, theme=None, config={"scrollZoom": True, "displaylogo": False})
 
 
 def show_df(df, **kw):
@@ -53,7 +54,7 @@ def init_state():
     ss.setdefault("data_sig", None)
     ss.setdefault("chat", [])
     ss.setdefault("last_feedback", None)
-    ss.setdefault("mode", "Replay (entraînement)")
+    ss.setdefault("mode", "Live différé (Yahoo ~10-15 min)")
 
 
 def _json_default(o):
@@ -119,6 +120,12 @@ with st.sidebar:
         tz_csv = st.selectbox("Fuseau des dates du CSV", [NY_TZ, "Europe/Paris", "UTC", "America/Chicago"], key="tz_csv")
     else:
         interval = st.selectbox("Unité de temps (démo)", ["5m", "15m", "1h"], index=1, key="demo_iv")
+    if source == "Yahoo Finance":
+        if st.button("🔄 Actualiser les cotations maintenant"):
+            load_yahoo.clear()
+            st.rerun()
+        st.checkbox("⏱️ Live auto : recharger toutes les 60 s", value=True, key="live_auto",
+                    help="Recharge les dernières bougies Yahoo (différé ~10-15 min). Désactivé automatiquement en mode Replay.")
     st.markdown("### Moteur ICT")
     swing_n = st.slider("Sensibilité des swings (bougies de chaque côté)", 1, 6, 2, key="swing_n")
     fvg_min = st.number_input("Taille mini d'un FVG (points)", 0.5, 50.0, 4.0, 0.5, key="fvg_min")
@@ -202,10 +209,17 @@ def visible_df() -> pd.DataFrame:
         return df_full
     if ss.mode.startswith("Replay"):
         if ss.replay_idx is None:
-            ss.replay_idx = max(60, int(len(df_full) * 0.5))
+            d_all = sorted(set(df_full.index.date))
+            d0 = d_all[-3] if len(d_all) >= 3 else d_all[0]
+            ss.replay_idx = max(60, int(np.searchsorted(df_full.index.date, d0)))
         ss.replay_idx = int(min(max(ss.replay_idx, 40), len(df_full)))
         return df_full.iloc[:ss.replay_idx]
     return df_full
+
+
+def latest_analysis():
+    """Toujours les DERNIÈRES bougies disponibles (indépendant du replay)."""
+    return analyze(df_full.iloc[-3000:], st.session_state.swing_n, st.session_state.fvg_min), df_full
 
 
 def current_analysis():
@@ -267,12 +281,49 @@ def mmm_panel(m):
         show_df(pd.DataFrame(map_table(m), columns=["Élément", "Lecture"]), hide_index=True)
 
 
+def freshness_bar():
+    """Bandeau en haut de chaque page : date/heure de la dernière bougie et état du flux."""
+    if df_full is None or df_full.empty:
+        return
+    last = df_full.index[-1]
+    step = (df_full.index[-1] - df_full.index[-2]) if len(df_full) > 1 else pd.Timedelta("15min")
+    now = pd.Timestamp.now(tz=NY_TZ)
+    mins = max(0, int((now - (last + step)).total_seconds() // 60))
+    wd, hh = now.dayofweek, now.hour
+    closed = wd == 5 or (wd == 6 and hh < 18) or (wd == 4 and hh >= 17) or hh == 17  # week-end + maintenance CME 17h-18h NY
+    if source == "Démo hors-ligne":
+        cls, col, txt = "live-bad", "#B3261E", "DÉMO — prix synthétiques, PAS le vrai marché (choisis Yahoo Finance)"
+    elif source == "Fichier CSV":
+        cls, col, txt = "live-warn", "#B85C00", "CSV importé — données historiques"
+    elif closed and mins < 3 * 24 * 60:
+        cls, col, txt = "live-warn", "#B85C00", "MARCHÉ FERMÉ — dernières cotations disponibles"
+    elif mins <= 35:
+        cls, col, txt = "live-ok", "#0B7A3E", f"EN DIRECT · différé ~{max(mins, 1)} min (Yahoo)"
+    elif mins <= 180:
+        cls, col, txt = "live-warn", "#B85C00", f"RETARD de {mins} min — clique sur « Actualiser les cotations »"
+    else:
+        cls, col, txt = "live-bad", "#B3261E", f"DONNÉES ANCIENNES ({mins // 60} h) — clique sur « Actualiser les cotations »"
+    paris = last.tz_convert("Europe/Paris")
+    live_bar(f'<span class="{cls}"><span class="live-dot" style="background:{col}"></span>{txt}</span>'
+             f'<span>Dernière bougie : <b>{last:%a %d/%m/%Y %H:%M}</b> NY ({paris:%H:%M} Paris) · '
+             f'MNQ <b>{float(df_full["close"].iloc[-1]):,.2f}</b> · {src_label}</span>')
+
+
+def goto(page: str):
+    st.session_state["nav"] = page
+    st.session_state.page = page
+
+
 # ====================================================================== PAGES
+freshness_bar()
 if ss.page == "🏠 Accueil":
     st.title("ICT MNQ Academy")
     st.markdown("Plateforme d'entraînement au trading **ICT / Smart Money** sur le **Micro Nasdaq (MNQ)** : "
                 "graphique réel Yahoo Finance, **compte fictif**, mode **replay** bougie par bougie, **coach** qui note "
                 "chaque trade selon la méthode du cours Warren, et **agent expert** technique + macro.")
+    g1, g2 = st.columns(2)
+    g1.button("🔴  TRADER EN DIRECT — signaux live", type="primary", on_click=goto, args=("🔴 TRADER EN DIRECT (signaux live)",), use_container_width=True)
+    g2.button("🎯  PASSER UN ORDRE — compte fictif", on_click=goto, args=("🎯 PASSER UN ORDRE (compte fictif)",), use_container_width=True)
     c1, c2, c3, c4 = st.columns(4)
     acc = ss.acc
     st_ = paper.stats(acc["trades"])
@@ -283,8 +334,8 @@ if ss.page == "🏠 Accueil":
     if msg:
         st.info(msg)
     if HAS_DATA:
-        a, v = current_analysis()
-        st.markdown(f"**{src_label}** · dernière bougie visible : {v.index[-1]:%d/%m/%Y %H:%M} (NY) · "
+        a, v = latest_analysis()
+        st.markdown(f"**{src_label}** · dernière bougie : {v.index[-1]:%d/%m/%Y %H:%M} (NY) · "
                     f"biais {pill(a.bias, 'green' if a.bias_score == 1 else 'red' if a.bias_score == -1 else 'orange')}",
                     unsafe_allow_html=True)
         show_fig(ict_chart(a, window=min(window, 200), show=show, title="Aperçu du marché"), key="home_chart")
@@ -298,15 +349,16 @@ if ss.page == "🏠 Accueil":
         card("3 · Progresser", "Le <b>Journal & Coach</b> note chaque trade (A à D) et repère tes erreurs récurrentes. L'<b>Agent</b> analyse marché, macro et tes CSV.")
 
 # ---------------------------------------------------------------- SIMULATEUR
-elif ss.page == "🎯 Simulateur MNQ":
-    st.title("🎯 Simulateur MNQ — compte fictif")
+elif ss.page == "🎯 PASSER UN ORDRE (compte fictif)":
+    st.title("🎯 Passer un ordre — compte fictif MNQ")
     if msg:
         st.info(msg)
     if not HAS_DATA:
         st.warning("Pas de données exploitables. Essaie une autre unité de temps, le mode démo ou un CSV.")
         st.stop()
-    mode = st.radio("Mode", ["Replay (entraînement)", "Live différé (Yahoo ~10-15 min)"], horizontal=True,
-                    index=0 if ss.mode.startswith("Replay") else 1, key="mode_radio")
+    mode = st.radio("Mode", ["Live différé (Yahoo ~10-15 min)", "Replay (entraînement)"], horizontal=True,
+                    index=1 if ss.mode.startswith("Replay") else 0, key="mode_radio",
+                    help="Live = dernières bougies du marché (Yahoo, ~10-15 min de retard). Replay = rejouer le passé bougie par bougie.")
     if mode != ss.mode:
         acc = ss.acc
         if acc["position"]:
@@ -322,7 +374,7 @@ elif ss.page == "🎯 Simulateur MNQ":
         rc = st.columns([1.3, 1, 1, 1, 1, 1, 1.3])
         dates = sorted(set(df_full.index.date))
         start_d = rc[0].selectbox("Démarrer le replay au", dates[1:-1] if len(dates) > 3 else dates,
-                                  index=max(0, len(dates) // 2 - 1), key="replay_start", format_func=lambda d: d.strftime("%a %d/%m/%Y"))
+                                  index=max(0, len(dates[1:-1] if len(dates) > 3 else dates) - 2), key="replay_start", format_func=lambda d: d.strftime("%a %d/%m/%Y"))
         if rc[0].button("⏮ Positionner", help="Recommence le replay à cette date (le futur est masqué)."):
             if acc["position"]:
                 vv = visible_df()
@@ -555,7 +607,7 @@ elif ss.page == "🤖 Agent expert":
         ss.ollama_host = o1.text_input("Hôte Ollama", ss.get("ollama_host", "http://localhost:11434"))
         ss.ollama_model = o2.text_input("Modèle", ss.get("ollama_model", "mistral"))
     tA, tB, tC = st.tabs(["📊 Analyse du marché", "💬 Discuter avec l'agent", "📂 Analyser un CSV"])
-    a = current_analysis()[0] if HAS_DATA else None
+    a = latest_analysis()[0] if HAS_DATA else None
 
     def macro_bundle():
         with st.spinner("Lecture des marchés liés et de l'actualité…"):
@@ -675,9 +727,9 @@ elif ss.page == "🤖 Agent expert":
                         if ans:
                             st.markdown(ans)
 
-elif ss.page == "🖥️ Edge Desk (live)":
+elif ss.page == "🔴 TRADER EN DIRECT (signaux live)":
     if msg and not HAS_DATA:
-        st.title("🖥️ Edge Desk — poste de pilotage MNQ")
+        st.title("🔴 Trader en direct — signaux live MNQ")
         st.warning(msg)
     elif HAS_DATA:
         render_desk(df_full, src_label, show, window)
@@ -702,7 +754,7 @@ elif ss.page == "📚 Figures ICT":
     else:
         components.html(CHEATSHEET_HTML, height=300, scrolling=True)
     if HAS_DATA:
-        a = current_analysis()[0]
+        a = latest_analysis()[0]
         cnt = dict(MSS=sum(e["kind"] == "MSS" for e in a.events[-200:]), BOS=sum(e["kind"] == "BOS" for e in a.events[-200:]),
                    OB=sum(not o["breaker"] for o in a.obs[-200:]), Breakers=sum(o["breaker"] for o in a.obs[-200:]),
                    FVG_ouverts=sum(g["status"] != "comblé" for g in a.fvgs), Sweeps=len(a.sweeps[-200:]), EQH_EQL=len(a.eq_levels))
@@ -816,3 +868,13 @@ _Plateforme d'entraînement — aucune donnée n'est un conseil en investissemen
 
 st.markdown('<div class="footer">ICT MNQ Academy · entraînement au trading sur compte fictif · '
             'données Yahoo Finance différées · aucune information n\'est un conseil en investissement</div>', unsafe_allow_html=True)
+
+ss["_last_full_run"] = _time.time()
+if (source == "Yahoo Finance" and ss.get("live_auto") and hasattr(st, "fragment")
+        and not (ss.page == "🎯 PASSER UN ORDRE (compte fictif)" and ss.mode.startswith("Replay"))):
+    @st.fragment(run_every=60)
+    def _live_tick():
+        if _time.time() - st.session_state.get("_last_full_run", 0) >= 50:
+            load_yahoo.clear()
+            st.rerun(scope="app")
+    _live_tick()

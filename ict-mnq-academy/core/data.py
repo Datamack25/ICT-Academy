@@ -49,7 +49,7 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
     return df.astype(float)
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_yahoo(ticker: str, interval: str, period: str) -> pd.DataFrame:
     """Télécharge les bougies Yahoo (différé ~10-15 min sur les futures)."""
     import yfinance as yf
