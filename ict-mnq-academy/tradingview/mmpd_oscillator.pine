@@ -1,0 +1,31 @@
+//@version=6
+indicator("MMPD — oscillateur Premium / Discount (gate de momentum)", shorttitle="MMPD", overlay=false)
+
+lenSlow = input.int(27, "Longueur lente", minval=2)
+lenFast = input.int(9, "Longueur rapide", minval=2)
+smooth  = input.int(1, "Lissage (1 = brut, comme la plateforme)", minval=1)
+xp      = input.float(80, "Seuil XP (extrême premium)")
+xd      = input.float(20, "Seuil XD (extrême discount)")
+
+pos(float src, int len) =>
+    float hh = ta.highest(high, len)
+    float ll = ta.lowest(low, len)
+    hh - ll > 0 ? (src - ll) / (hh - ll) * 100 : 50.0
+
+cLine  = ta.sma(pos(close, lenSlow), smooth)
+oLine  = ta.sma(pos(open, lenSlow), smooth)
+fast   = ta.sma(pos(close, lenFast), smooth)
+upper  = math.max(cLine, oLine)
+lower  = math.min(cLine, oLine)
+inXP   = upper >= xp
+inXD   = lower <= xd
+
+plot(cLine, "MMPD 27 (c)", color.teal, 2)
+plot(oLine, "MMPD 27 (o)", color.fuchsia, 1)
+plot(fast, "MMPD 9", color.new(color.gray, 30), 1)
+hline(xp, "XP", color.green, hline.style_dashed)
+hline(50, "50", color.gray, hline.style_dotted)
+hline(xd, "XD", color.red, hline.style_dashed)
+bgcolor(inXP ? color.new(color.green, 88) : inXD ? color.new(color.red, 88) : na)
+alertcondition(inXP and not inXP[1], "Entrée en XP", "MMPD : longs autorisés (momentum)")
+alertcondition(inXD and not inXD[1], "Entrée en XD", "MMPD : shorts autorisés (momentum)")

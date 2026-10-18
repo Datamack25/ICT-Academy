@@ -1,0 +1,248 @@
+//@version=6
+indicator("ICT MNQ Suite — structure, OB, breakers, FVG, liquidité, OTE, kill zones", shorttitle="ICT MNQ Suite", overlay=true, max_boxes_count=300, max_lines_count=300, max_labels_count=300, max_bars_back=500)
+
+// ───────── Réglages
+tz = "America/New_York"
+grpS = "Structure"
+swLen      = input.int(2, "Sensibilité des swings (bougies de chaque côté)", minval=1, maxval=10, group=grpS)
+showStruct = input.bool(true, "Afficher BOS / MSS (clôture)", group=grpS)
+grpZ = "Zones (PD arrays)"
+showOB   = input.bool(true, "Orderblocks", group=grpZ)
+showBrk  = input.bool(true, "Breakers (OB cassés)", group=grpZ)
+showFVG  = input.bool(true, "Fair Value Gaps", group=grpZ)
+fvgMin   = input.float(4.0, "Taille mini d'un FVG (points)", minval=0.0, group=grpZ)
+maxZones = input.int(6, "Zones conservées par type", minval=1, maxval=40, group=grpZ)
+grpL = "Liquidité & niveaux"
+showSweep  = input.bool(true, "Sweeps / SFP (BSL – SSL pris)", group=grpL)
+showLevels = input.bool(true, "PDH / PDL · Monday High/Low · Midnight Open · Weekly Open", group=grpL)
+showOTE    = input.bool(true, "Range de travail · EQ · OTE 0,62–0,79 (0,705)", group=grpL)
+grpK = "Kill zones (heure de New York)"
+showKZ  = input.bool(true, "Colorer les kill zones", group=grpK)
+kzLon   = input.session("0200-0500", "London KZ", group=grpK)
+kzNYAM  = input.session("0700-1000", "NY AM KZ", group=grpK)
+kzSB    = input.session("1000-1100", "Silver Bullet", group=grpK)
+kzNYPM  = input.session("1330-1600", "NY PM KZ", group=grpK)
+
+inSess(string s) => not na(time(timeframe.period, s, tz))
+
+bgcolor(showKZ and inSess(kzSB) ? color.new(color.orange, 88) : showKZ and inSess(kzNYAM) ? color.new(color.orange, 93) : showKZ and inSess(kzLon) ? color.new(color.blue, 93) : showKZ and inSess(kzNYPM) ? color.new(color.gray, 94) : na, title="Kill zones")
+
+// ───────── Swings & structure (cassure validée à la CLÔTURE)
+ph = ta.pivothigh(high, swLen, swLen)
+pl = ta.pivotlow(low, swLen, swLen)
+var float lastSH = na
+var int   lastSHbar = na
+var bool  shUsed = true
+var float lastSL = na
+var int   lastSLbar = na
+var bool  slUsed = true
+var int   trend = 0
+if not na(ph)
+    lastSH    := ph
+    lastSHbar := bar_index - swLen
+    shUsed    := false
+if not na(pl)
+    lastSL    := pl
+    lastSLbar := bar_index - swLen
+    slUsed    := false
+
+var array<box> bullOB = array.new<box>()
+var array<box> bearOB = array.new<box>()
+var array<box> bullBrk = array.new<box>()
+var array<box> bearBrk = array.new<box>()
+var array<box> fvgUp = array.new<box>()
+var array<box> fvgDn = array.new<box>()
+
+pushBox(array<box> arr, box b) =>
+    array.push(arr, b)
+    if array.size(arr) > maxZones
+        box.delete(array.shift(arr))
+
+bullBreak = not shUsed and not na(lastSH) and close > lastSH
+bearBreak = not slUsed and not na(lastSL) and close < lastSL
+
+if bullBreak
+    string kind = trend == -1 ? "MSS" : "BOS"
+    if showStruct
+        line.new(lastSHbar, lastSH, bar_index, lastSH, color=color.new(color.green, 0), style=line.style_dashed)
+        label.new(int((lastSHbar + bar_index) / 2), lastSH, kind, style=label.style_label_down, color=color.new(color.white, 100), textcolor=color.green, size=size.small)
+    // OB haussier : dernière bougie baissière avant la jambe qui a cassé
+    int span = math.min(bar_index - lastSHbar + 3, 150)
+    int extOff = 0
+    float extLow = low
+    for k = 0 to span
+        if low[k] < extLow
+            extLow := low[k]
+            extOff := k
+    int obOff = -1
+    for k = extOff to math.min(extOff + 30, 200)
+        if close[k] < open[k]
+            obOff := k
+            break
+    if showOB and obOff >= 0
+        pushBox(bullOB, box.new(bar_index - obOff, high[obOff], bar_index, low[obOff], border_color=color.green, bgcolor=color.new(color.green, 85), extend=extend.right, text="OB+ " + kind, text_color=color.green, text_size=size.tiny, text_halign=text.align_left))
+    shUsed := true
+    trend := 1
+
+if bearBreak
+    string kind = trend == 1 ? "MSS" : "BOS"
+    if showStruct
+        line.new(lastSLbar, lastSL, bar_index, lastSL, color=color.new(color.red, 0), style=line.style_dashed)
+        label.new(int((lastSLbar + bar_index) / 2), lastSL, kind, style=label.style_label_up, color=color.new(color.white, 100), textcolor=color.red, size=size.small)
+    int span = math.min(bar_index - lastSLbar + 3, 150)
+    int extOff = 0
+    float extHigh = high
+    for k = 0 to span
+        if high[k] > extHigh
+            extHigh := high[k]
+            extOff := k
+    int obOff = -1
+    for k = extOff to math.min(extOff + 30, 200)
+        if close[k] > open[k]
+            obOff := k
+            break
+    if showOB and obOff >= 0
+        pushBox(bearOB, box.new(bar_index - obOff, high[obOff], bar_index, low[obOff], border_color=color.red, bgcolor=color.new(color.red, 85), extend=extend.right, text="OB− " + kind, text_color=color.red, text_size=size.tiny, text_halign=text.align_left))
+    slUsed := true
+    trend := -1
+
+// OB cassé à la clôture -> breaker de polarité inverse
+if array.size(bullOB) > 0
+    for k = array.size(bullOB) - 1 to 0
+        b = array.get(bullOB, k)
+        if close < box.get_bottom(b)
+            array.remove(bullOB, k)
+            if showBrk
+                box.set_bgcolor(b, color.new(color.red, 80))
+                box.set_border_color(b, color.red)
+                box.set_text(b, "Breaker ↓")
+                box.set_text_color(b, color.red)
+                pushBox(bearBrk, b)
+            else
+                box.delete(b)
+        else if low <= box.get_top(b)
+            box.set_text(b, "OB+ mitigé")
+if array.size(bearOB) > 0
+    for k = array.size(bearOB) - 1 to 0
+        b = array.get(bearOB, k)
+        if close > box.get_top(b)
+            array.remove(bearOB, k)
+            if showBrk
+                box.set_bgcolor(b, color.new(color.green, 80))
+                box.set_border_color(b, color.green)
+                box.set_text(b, "Breaker ↑")
+                box.set_text_color(b, color.green)
+                pushBox(bullBrk, b)
+            else
+                box.delete(b)
+        else if high >= box.get_bottom(b)
+            box.set_text(b, "OB− mitigé")
+// Breaker invalidé : clôture de l'autre côté
+if array.size(bearBrk) > 0
+    for k = array.size(bearBrk) - 1 to 0
+        b = array.get(bearBrk, k)
+        if close > box.get_top(b)
+            box.set_extend(b, extend.none)
+            box.set_right(b, bar_index)
+            box.set_text(b, "Breaker invalidé")
+            array.remove(bearBrk, k)
+if array.size(bullBrk) > 0
+    for k = array.size(bullBrk) - 1 to 0
+        b = array.get(bullBrk, k)
+        if close < box.get_bottom(b)
+            box.set_extend(b, extend.none)
+            box.set_right(b, bar_index)
+            box.set_text(b, "Breaker invalidé")
+            array.remove(bullBrk, k)
+
+// ───────── FVG (3 bougies)
+if showFVG and low > high[2] and low - high[2] >= fvgMin
+    pushBox(fvgUp, box.new(bar_index - 2, low, bar_index, high[2], border_color=color.new(color.blue, 40), bgcolor=color.new(color.blue, 88), extend=extend.right, text="FVG", text_color=color.blue, text_size=size.tiny))
+if showFVG and high < low[2] and low[2] - high >= fvgMin
+    pushBox(fvgDn, box.new(bar_index - 2, low[2], bar_index, high, border_color=color.new(color.blue, 40), bgcolor=color.new(color.blue, 88), extend=extend.right, text="FVG", text_color=color.blue, text_size=size.tiny))
+if array.size(fvgUp) > 0
+    for k = array.size(fvgUp) - 1 to 0
+        b = array.get(fvgUp, k)
+        if low <= box.get_bottom(b)
+            box.delete(b)
+            array.remove(fvgUp, k)
+if array.size(fvgDn) > 0
+    for k = array.size(fvgDn) - 1 to 0
+        b = array.get(fvgDn, k)
+        if high >= box.get_top(b)
+            box.delete(b)
+            array.remove(fvgDn, k)
+
+// ───────── Sweeps / SFP : mèche au-delà du swing, clôture de retour
+var float sweptH = na
+var float sweptL = na
+bslSweep = not na(lastSH) and high > lastSH and close < lastSH and (na(sweptH) or lastSH != sweptH)
+sslSweep = not na(lastSL) and low < lastSL and close > lastSL and (na(sweptL) or lastSL != sweptL)
+if bslSweep
+    sweptH := lastSH
+if sslSweep
+    sweptL := lastSL
+plotshape(showSweep and bslSweep, "BSL pris", shape.triangledown, location.abovebar, color.red, text="BSL", textcolor=color.red, size=size.tiny)
+plotshape(showSweep and sslSweep, "SSL pris", shape.triangleup, location.belowbar, color.green, text="SSL", textcolor=color.green, size=size.tiny)
+
+// ───────── Niveaux clés
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+wOpen = request.security(syminfo.tickerid, "W", open, lookahead=barmerge.lookahead_on)
+var float midOpen = na
+if dayofmonth(time, tz) != dayofmonth(time[1], tz)
+    midOpen := open
+var float monH = na
+var float monL = na
+newWeek = timeframe.change("W")
+if newWeek
+    monH := na
+    monL := na
+isMonday = dayofweek(time_tradingday, "UTC") == dayofweek.monday
+if isMonday
+    monH := na(monH) ? high : math.max(monH, high)
+    monL := na(monL) ? low : math.min(monL, low)
+plot(showLevels ? pdh : na, "PDH", color.new(color.purple, 0), 1, plot.style_linebr)
+plot(showLevels ? pdl : na, "PDL", color.new(color.purple, 0), 1, plot.style_linebr)
+plot(showLevels ? monH : na, "Monday High", color.new(color.orange, 0), 1, plot.style_linebr)
+plot(showLevels ? monL : na, "Monday Low", color.new(color.orange, 0), 1, plot.style_linebr)
+plot(showLevels ? midOpen : na, "Midnight Open", color.new(color.black, 0), 1, plot.style_linebr)
+plot(showLevels ? wOpen : na, "Weekly Open", color.new(color.gray, 0), 1, plot.style_linebr)
+
+// ───────── Range de travail (swings majeurs) · EQ · OTE
+bigLen = swLen * 3
+bph = ta.pivothigh(high, bigLen, bigLen)
+bpl = ta.pivotlow(low, bigLen, bigLen)
+var float rHi = na
+var int   rHiBar = na
+var float rLo = na
+var int   rLoBar = na
+if not na(bph)
+    rHi := bph
+    rHiBar := bar_index - bigLen
+if not na(bpl)
+    rLo := bpl
+    rLoBar := bar_index - bigLen
+var line lHi = na
+var line lLo = na
+var line lEq = na
+var box  bOte = na
+if showOTE and barstate.islast and not na(rHi) and not na(rLo) and rHi > rLo
+    line.delete(lHi)
+    line.delete(lLo)
+    line.delete(lEq)
+    box.delete(bOte)
+    float rg = rHi - rLo
+    int x0 = math.min(rHiBar, rLoBar)
+    lHi := line.new(x0, rHi, bar_index + 10, rHi, color=color.navy, width=1)
+    lLo := line.new(x0, rLo, bar_index + 10, rLo, color=color.navy, width=1)
+    lEq := line.new(x0, rLo + rg / 2, bar_index + 10, rLo + rg / 2, color=color.navy, style=line.style_dotted)
+    bool legUp = rLoBar < rHiBar
+    float o1 = legUp ? rHi - 0.79 * rg : rLo + 0.62 * rg
+    float o2 = legUp ? rHi - 0.62 * rg : rLo + 0.79 * rg
+    bOte := box.new(x0, o2, bar_index + 10, o1, border_color=color.orange, bgcolor=color.new(color.orange, 88), text="OTE 0,705 · " + (legUp ? "discount (achats)" : "premium (ventes)"), text_color=color.orange, text_size=size.tiny)
+
+// ───────── Alertes
+alertcondition(bullBreak and trend == 1, "Rupture haussière", "MNQ : clôture au-dessus du dernier swing high")
+alertcondition(bearBreak and trend == -1, "Rupture baissière", "MNQ : clôture sous le dernier swing low")
+alertcondition(sslSweep, "SSL balayé", "MNQ : sell-side liquidity prise (SFP haussier)")
+alertcondition(bslSweep, "BSL balayé", "MNQ : buy-side liquidity prise (SFP baissier)")

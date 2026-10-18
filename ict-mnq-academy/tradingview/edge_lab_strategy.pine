@@ -1,0 +1,315 @@
+//@version=6
+strategy("ICT × MMM Edge Lab — MNQ (backtest)", shorttitle="Edge Lab", overlay=true, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=2, commission_type=strategy.commission.cash_per_contract, commission_value=0.52, slippage=1, max_labels_count=300, max_bars_back=500)
+
+tz = "America/New_York"
+grpS = "Setups"
+useZ   = input.bool(true, "Z · marche T3+ (LD2+/SD2+) à la clôture", group=grpS)
+useG   = input.bool(true, "G · GMC long (clôture c3)", group=grpS)
+useB   = input.bool(true, "B · GMC long dont c3 fait un nouveau haut et réintègre c2 (AFs contre)", group=grpS)
+useM   = input.bool(false, "M · BC+ long (sans plus bas inférieur, clôture moitié haute)", group=grpS)
+useICT = input.bool(true, "ICT · sweep de liquidité puis MSS (méthode C, entrée clôture)", group=grpS)
+swLen  = input.int(2, "Sensibilité des swings", minval=1, maxval=10, group=grpS)
+grpR = "Risque & sorties"
+qtyC     = input.int(2, "Contrats MNQ (≥ 2 pour la ½ sortie)", minval=1, group=grpR)
+stopMode = input.string("ATR", "Stop", options=["ATR", "Fixe (points)"], group=grpR)
+atrMult  = input.float(1.5, "Multiple d'ATR(14)", minval=0.1, step=0.1, group=grpR)
+fixPts   = input.float(50, "Stop fixe (points)", minval=1, group=grpR)
+useHalf  = input.bool(true, "½ sortie puis stop à l'entrée", group=grpR)
+halfR    = input.float(0.5, "½ sortie à + (R)", minval=0.1, step=0.1, group=grpR)
+runR     = input.float(3.0, "Objectif runner (R)", minval=0.5, step=0.5, group=grpR)
+maxBars  = input.int(64, "Sortie forcée après (bougies)", minval=1, group=grpR)
+grpF = "Filtres"
+fSess  = input.string("Asie + NY AM", "Sessions", options=["Toutes", "Asie + NY AM", "NY AM"], group=grpF)
+skip02 = input.bool(true, "Ignorer 00h00–02h00 (fin d'Asie)", group=grpF)
+fGate  = input.bool(true, "Gate MMPD 27 momentum (long XP / short XD)", group=grpF)
+fDaily = input.bool(true, "Bougie journalière d'hier dans le sens", group=grpF)
+grpP = "Compte prop (aide au sizing)"
+propDD   = input.float(2500, "Drawdown autorisé ($)", group=grpP)
+splitPct = input.float(70, "Période ancienne (%) / récente", minval=10, maxval=90, group=grpP)
+
+// ───────── Filtres
+inS(string s) => not na(time(timeframe.period, s, tz))
+okSess = fSess == "Toutes" ? true : fSess == "NY AM" ? inS("0930-1330") : (inS("0930-1330") or inS("1800-0200"))
+okSess := okSess and not (skip02 and inS("0000-0200"))
+pos27(float src) =>
+    float hh = ta.highest(high, 27)
+    float ll = ta.lowest(low, 27)
+    hh - ll > 0 ? (src - ll) / (hh - ll) * 100 : 50.0
+mc = pos27(close)
+mo = pos27(open)
+xpOk = math.max(mc, mo) >= 80
+xdOk = math.min(mc, mo) <= 20
+[dO, dC] = request.security(syminfo.tickerid, "D", [open[1], close[1]], lookahead=barmerge.lookahead_on)
+dUp = dC > dO
+dDn = dC < dO
+
+// ───────── Bougies & GMC
+bcUp = close > high[1]
+gmcUp = bcUp[1] and low > high[2]
+afsAgainst = high > high[1] and close <= high[1]
+rngC = high - low
+mLong = bcUp and low >= low[1] and rngC > 0 and (close - low) / rngC >= 0.5
+
+// ───────── Escalier (setup Z) — même moteur que la plateforme
+ph = ta.pivothigh(high, swLen, swLen)
+pl = ta.pivotlow(low, swLen, swLen)
+var int   zDir = 0
+var int   zT = 0
+var float tLvl = na
+var int   tBar = na
+var float pLvl = na
+var int   pBar = na
+var float zSH = na
+var int   zSHb = na
+var float zSL = na
+var int   zSLb = na
+if not na(ph)
+    zSH := ph
+    zSHb := bar_index - swLen
+    if zDir == 1 and zSHb > tBar and (na(pLvl) or ph > pLvl)
+        pLvl := ph
+        pBar := zSHb
+if not na(pl)
+    zSL := pl
+    zSLb := bar_index - swLen
+    if zDir == -1 and zSLb > tBar and (na(pLvl) or pl < pLvl)
+        pLvl := pl
+        pBar := zSLb
+// événement : 1 = flip (CDL/CDS, nouvelle T1), 2 = continuation (LD/SD, marche suivante)
+int evKind = 0
+int evDir = 0
+float evLvl = na
+int evLvlBar = na
+int startBar = na
+if zDir == 0
+    if not na(zSH) and close > zSH
+        evKind := 1
+        evDir := 1
+        evLvl := zSH
+        evLvlBar := zSHb
+        startBar := zSHb - 20
+    else if not na(zSL) and close < zSL
+        evKind := 1
+        evDir := -1
+        evLvl := zSL
+        evLvlBar := zSLb
+        startBar := zSLb - 20
+else if zDir == 1
+    if close < tLvl
+        evKind := 1
+        evDir := -1
+        evLvl := tLvl
+        evLvlBar := tBar
+        startBar := tBar
+    else if not na(pLvl) and close > pLvl
+        evKind := 2
+        evDir := 1
+        evLvl := pLvl
+        evLvlBar := pBar
+        startBar := pBar
+else
+    if close > tLvl
+        evKind := 1
+        evDir := 1
+        evLvl := tLvl
+        evLvlBar := tBar
+        startBar := tBar
+    else if not na(pLvl) and close < pLvl
+        evKind := 2
+        evDir := -1
+        evLvl := pLvl
+        evLvlBar := pBar
+        startBar := pBar
+float ext = na
+int extBar = na
+if evKind != 0
+    // origine de la nouvelle marche = extrême opposé depuis le niveau cassé (R# pour une continuation)
+    int back = math.max(0, math.min(bar_index - startBar, 300))
+    ext := evDir == 1 ? low : high
+    extBar := bar_index
+    for k = 0 to back
+        if evDir == 1 and low[k] < ext
+            ext := low[k]
+            extBar := bar_index - k
+        if evDir == -1 and high[k] > ext
+            ext := high[k]
+            extBar := bar_index - k
+    zT := evKind == 1 ? 1 : zT + 1
+    zDir := evDir
+    tLvl := ext
+    tBar := extBar
+    pLvl := na
+    pBar := na
+zLong  = useZ and evKind == 2 and evDir == 1 and zT >= 3
+zShort = useZ and evKind == 2 and evDir == -1 and zT >= 3
+
+// ───────── ICT méthode C simplifiée : sweep de liquidité puis rupture de structure opposée (MSS) à la clôture
+var float sH = na
+var bool  sHu = true
+var float sL = na
+var bool  sLu = true
+var int   iDir = 0
+var int   lastSSL = -1000
+var int   lastBSL = -1000
+if not na(ph)
+    sH := ph
+    sHu := false
+if not na(pl)
+    sL := pl
+    sLu := false
+if not na(sL) and low < sL and close > sL
+    lastSSL := bar_index
+if not na(sH) and high > sH and close < sH
+    lastBSL := bar_index
+upBrk = not sHu and not na(sH) and close > sH
+dnBrk = not sLu and not na(sL) and close < sL
+bool mssUp = false
+bool mssDn = false
+if upBrk
+    mssUp := iDir == -1
+    iDir := 1
+    sHu := true
+if dnBrk
+    mssDn := iDir == 1
+    iDir := -1
+    sLu := true
+ictLong  = useICT and mssUp and bar_index - lastSSL <= 40
+ictShort = useICT and mssDn and bar_index - lastBSL <= 40
+gLong = useG and gmcUp
+bLong = useB and gmcUp and afsAgainst
+mL    = useM and mLong
+
+longSig  = (zLong or gLong or bLong or mL or ictLong) and okSess and (not fGate or xpOk) and (not fDaily or dUp)
+shortSig = (zShort or ictShort) and okSess and (not fGate or xdOk) and (not fDaily or dDn)
+
+// ───────── Gestion
+atr14 = ta.atr(14)
+var float ePx = na
+var float slPx = na
+var float t1Px = na
+var float t2Px = na
+var bool  halfHit = false
+var int   eBar = na
+var map<int, float> riskMap = map.new<int, float>()
+stopDist = stopMode == "ATR" ? atrMult * atr14 : fixPts
+bool newL = false
+bool newS = false
+if strategy.position_size == 0
+    halfHit := false
+    if longSig
+        ePx := close
+        slPx := close - stopDist
+        t1Px := close + stopDist * halfR
+        t2Px := close + stopDist * runR
+        eBar := bar_index
+        map.put(riskMap, time, stopDist * syminfo.pointvalue * qtyC)
+        strategy.entry("L", strategy.long, qty=qtyC, comment=zLong ? "Z" : ictLong ? "ICT" : bLong ? "B" : gLong ? "G" : "M")
+        newL := true
+    else if shortSig
+        ePx := close
+        slPx := close + stopDist
+        t1Px := close - stopDist * halfR
+        t2Px := close - stopDist * runR
+        eBar := bar_index
+        map.put(riskMap, time, stopDist * syminfo.pointvalue * qtyC)
+        strategy.entry("S", strategy.short, qty=qtyC, comment=zShort ? "Z" : "ICT")
+        newS := true
+if strategy.position_size > 0 or newL
+    if not newL and high >= t1Px
+        halfHit := true
+    if useHalf
+        strategy.exit("L½", "L", qty_percent=50, limit=t1Px, stop=slPx)
+        strategy.exit("LR", "L", limit=t2Px, stop=halfHit ? ePx : slPx)
+    else
+        strategy.exit("LX", "L", limit=t2Px, stop=slPx)
+if strategy.position_size < 0 or newS
+    if not newS and low <= t1Px
+        halfHit := true
+    if useHalf
+        strategy.exit("S½", "S", qty_percent=50, limit=t1Px, stop=slPx)
+        strategy.exit("SR", "S", limit=t2Px, stop=halfHit ? ePx : slPx)
+    else
+        strategy.exit("SX", "S", limit=t2Px, stop=slPx)
+if strategy.position_size != 0 and not na(eBar) and bar_index - eBar >= maxBars
+    strategy.close_all(comment="Temps")
+
+plot(strategy.position_size != 0 ? slPx : na, "Stop", color.red, 1, plot.style_linebr)
+plot(strategy.position_size != 0 ? t2Px : na, "Objectif", color.green, 1, plot.style_linebr)
+
+// ───────── Statistiques (même lecture que la plateforme) : WR, avg RR, PF, t-score, DD en R, pertes de suite
+var table st = table.new(position.bottom_right, 2, 11, bgcolor=color.white, border_color=color.gray, border_width=1)
+if barstate.islastconfirmedhistory or barstate.islast
+    map<int, float> pnl = map.new<int, float>()
+    if strategy.closedtrades > 0
+        for i = 0 to strategy.closedtrades - 1
+            int k = strategy.closedtrades.entry_time(i)
+            float prev = map.contains(pnl, k) ? map.get(pnl, k) : 0.0
+            map.put(pnl, k, prev + strategy.closedtrades.profit(i))
+    array<int> keys = map.keys(pnl)
+    array.sort(keys)
+    int n = array.size(keys)
+    float sumR = 0.0
+    float sumR2 = 0.0
+    float gw = 0.0
+    float gl = 0.0
+    int wins = 0
+    float eq = 0.0
+    float peak = 0.0
+    float mdd = 0.0
+    int run = 0
+    int streak = 0
+    int nOld = int(n * splitPct / 100)
+    float sOld = 0.0
+    float sNew = 0.0
+    if n > 0
+        for j = 0 to n - 1
+            int k = array.get(keys, j)
+            float rk = map.contains(riskMap, k) ? map.get(riskMap, k) : na
+            float r = na(rk) or rk == 0 ? 0.0 : map.get(pnl, k) / rk
+            sumR += r
+            sumR2 += r * r
+            if r > 0
+                wins += 1
+                gw += r
+                run := 0
+            else
+                gl -= r
+                run += 1
+                streak := math.max(streak, run)
+            eq += r
+            peak := math.max(peak, eq)
+            mdd := math.max(mdd, peak - eq)
+            if j < nOld
+                sOld += r
+            else
+                sNew += r
+    float avg = n > 0 ? sumR / n : na
+    float sd = n > 1 ? math.sqrt(math.max((sumR2 - n * avg * avg) / (n - 1), 0)) : na
+    float tsc = n > 1 and sd > 0 ? avg / (sd / math.sqrt(n)) : na
+    float pf = gl > 0 ? gw / gl : na
+    float aOld = nOld > 0 ? sOld / nOld : na
+    float aNew = n - nOld > 0 ? sNew / (n - nOld) : na
+    string verdict = n < 30 ? "WATCH (trop peu de trades)" : (aOld > 0 and aNew > 0 and tsc >= 2) ? "TRADE" : (aOld > 0 and aNew > 0) ? "WATCH" : "DON'T TRADE"
+    float riskSugg = mdd > 0 ? propDD / (mdd * 1.5) : na
+    table.cell(st, 0, 0, "Trades", text_color=color.black)
+    table.cell(st, 1, 0, str.tostring(n), text_color=color.black)
+    table.cell(st, 0, 1, "Win rate", text_color=color.black)
+    table.cell(st, 1, 1, n > 0 ? str.tostring(wins * 100.0 / n, "#.0") + " %" : "—", text_color=color.black)
+    table.cell(st, 0, 2, "avg RR (après coûts)", text_color=color.black)
+    table.cell(st, 1, 2, str.tostring(avg, "+#.000;-#.000"), text_color=avg > 0 ? color.green : color.red)
+    table.cell(st, 0, 3, "Profit factor (en R)", text_color=color.black)
+    table.cell(st, 1, 3, str.tostring(pf, "#.00"), text_color=color.black)
+    table.cell(st, 0, 4, "t-score", text_color=color.black)
+    table.cell(st, 1, 4, str.tostring(tsc, "#.00"), text_color=tsc >= 2 ? color.green : color.black)
+    table.cell(st, 0, 5, "Max DD (R)", text_color=color.black)
+    table.cell(st, 1, 5, str.tostring(mdd, "#.0"), text_color=color.black)
+    table.cell(st, 0, 6, "Pertes de suite (max)", text_color=color.black)
+    table.cell(st, 1, 6, str.tostring(streak), text_color=color.black)
+    table.cell(st, 0, 7, "avg RR ancien → récent", text_color=color.black)
+    table.cell(st, 1, 7, str.tostring(aOld, "+#.00;-#.00") + " → " + str.tostring(aNew, "+#.00;-#.00"), text_color=color.black)
+    table.cell(st, 0, 8, "Verdict", text_color=color.black)
+    table.cell(st, 1, 8, verdict, text_color=verdict == "TRADE" ? color.green : verdict == "DON'T TRADE" ? color.red : color.orange)
+    table.cell(st, 0, 9, "Risque max / trade (prop)", text_color=color.black)
+    table.cell(st, 1, 9, na(riskSugg) ? "—" : str.tostring(riskSugg, "#") + " $", text_color=color.black)
+    table.cell(st, 0, 10, "Lecture", text_color=color.black)
+    table.cell(st, 1, 10, "t ≥ 2 = edge probable · t ≥ 3 = preuve forte", text_color=color.black)

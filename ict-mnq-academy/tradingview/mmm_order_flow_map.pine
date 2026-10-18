@@ -1,0 +1,220 @@
+//@version=6
+indicator("MMM Order-Flow Map — boussole, GMC, escalier T#, boîtes BZ, pullbacks", shorttitle="MMM Map", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=400, max_bars_back=500)
+
+tz = "America/New_York"
+grpC = "Boussole des bougies"
+showTags = input.bool(true, "Étiquettes BC+ / BC− / AFs+ / AFs− / CI", group=grpC)
+grpG = "GMC (gap-confirmed momentum)"
+showGMC = input.bool(true, "Lignes GMC open", group=grpG)
+maxGMC  = input.int(6, "GMC conservés", minval=1, maxval=30, group=grpG)
+grpT = "Escalier de tendance"
+showStair = input.bool(true, "T# · CDL/CDS · LD/SD · niveau protégé", group=grpT)
+swLen     = input.int(2, "Sensibilité des swings", minval=1, maxval=10, group=grpT)
+grpB = "Boîtes de session (BZ)"
+showBZ   = input.bool(true, "Boîtes 18h00 / 02h00 / 09h30 (NY)", group=grpB)
+openMins = input.int(30, "Durée de construction (minutes)", minval=1, maxval=240, group=grpB)
+grpP = "Zones de pullback"
+showPB = input.bool(true, "P–MP 87,5–75 % (bougie +) · BAL–MD 50–25 % (bougie −)", group=grpP)
+
+// ───────── Types de bougies (lecture à la clôture)
+rngC = high - low
+posC = rngC > 0 ? (close - low) / rngC : 0.5
+bcUp = close > high[1]
+bcDn = close < low[1]
+afUp = not bcUp and not bcDn and low < low[1] and close > low[1] and close <= high[1] and posC > 0.5
+afDn = not bcUp and not bcDn and not afUp and high > high[1] and close < high[1] and close >= low[1] and posC < 0.5
+ci   = not bcUp and not bcDn and not afUp and not afDn and high <= high[1] and low >= low[1]
+plotshape(showTags and bcUp, "BC+", shape.labeldown, location.abovebar, color.new(color.white, 100), text="BC+", textcolor=color.green, size=size.tiny)
+plotshape(showTags and bcDn, "BC−", shape.labelup, location.belowbar, color.new(color.white, 100), text="BC−", textcolor=color.red, size=size.tiny)
+plotshape(showTags and afUp, "AFs+", shape.labeldown, location.abovebar, color.new(color.white, 100), text="AFs+", textcolor=color.teal, size=size.tiny)
+plotshape(showTags and afDn, "AFs−", shape.labelup, location.belowbar, color.new(color.white, 100), text="AFs−", textcolor=color.maroon, size=size.tiny)
+plotshape(showTags and ci, "CI", shape.labeldown, location.abovebar, color.new(color.white, 100), text="CI", textcolor=color.gray, size=size.tiny)
+
+// ───────── GMC : c2 = BC, c3 laisse un vide avec c1 ; ligne à l'open de c2, supprimée sur clôture au-delà
+gmcUp = bcUp[1] and low > high[2]
+afsAgainst = high > high[1] and close <= high[1]
+gmcDn = bcDn[1] and high < low[2]
+var array<line> gL = array.new<line>()
+var array<int>  gD = array.new<int>()
+if showGMC and (gmcUp or gmcDn)
+    int d = gmcUp ? 1 : -1
+    array.push(gL, line.new(bar_index - 1, open[1], bar_index + 1, open[1], color=d == 1 ? color.green : color.red, style=line.style_dashed, width=2, extend=extend.right))
+    array.push(gD, d)
+    label.new(bar_index, open[1], d == 1 ? "GMC▲" : "GMC▼", style=d == 1 ? label.style_label_up : label.style_label_down, color=color.new(color.white, 100), textcolor=d == 1 ? color.green : color.red, size=size.tiny)
+    if array.size(gL) > maxGMC
+        line.delete(array.shift(gL))
+        array.shift(gD)
+if array.size(gL) > 0
+    for k = array.size(gL) - 1 to 0
+        ln = array.get(gL, k)
+        float lv = line.get_y1(ln)
+        int d = array.get(gD, k)
+        if (d == 1 and close < lv) or (d == -1 and close > lv)
+            line.set_extend(ln, extend.none)
+            line.set_x2(ln, bar_index)
+            array.remove(gL, k)
+            array.remove(gD, k)
+
+// ───────── Escalier T# (même moteur que la plateforme)
+// Haussier : T1 = origine après un flip (CDL). P# = sommet avant le pullback ; clôture > P# → LD# et le creux
+// du pullback (R#) devient la nouvelle marche. Clôture sous l'origine T → flip baissier (CDS). Z = T3+.
+ph = ta.pivothigh(high, swLen, swLen)
+pl = ta.pivotlow(low, swLen, swLen)
+var int   zDir = 0
+var int   zT = 0
+var float tLvl = na
+var int   tBar = na
+var float pLvl = na
+var int   pBar = na
+var float zSH = na
+var int   zSHb = na
+var float zSL = na
+var int   zSLb = na
+if not na(ph)
+    zSH := ph
+    zSHb := bar_index - swLen
+    if zDir == 1 and zSHb > tBar and (na(pLvl) or ph > pLvl)
+        pLvl := ph
+        pBar := zSHb
+if not na(pl)
+    zSL := pl
+    zSLb := bar_index - swLen
+    if zDir == -1 and zSLb > tBar and (na(pLvl) or pl < pLvl)
+        pLvl := pl
+        pBar := zSLb
+// événement : 1 = flip (CDL/CDS, nouvelle T1), 2 = continuation (LD/SD, marche suivante)
+int evKind = 0
+int evDir = 0
+float evLvl = na
+int evLvlBar = na
+int startBar = na
+if zDir == 0
+    if not na(zSH) and close > zSH
+        evKind := 1
+        evDir := 1
+        evLvl := zSH
+        evLvlBar := zSHb
+        startBar := zSHb - 20
+    else if not na(zSL) and close < zSL
+        evKind := 1
+        evDir := -1
+        evLvl := zSL
+        evLvlBar := zSLb
+        startBar := zSLb - 20
+else if zDir == 1
+    if close < tLvl
+        evKind := 1
+        evDir := -1
+        evLvl := tLvl
+        evLvlBar := tBar
+        startBar := tBar
+    else if not na(pLvl) and close > pLvl
+        evKind := 2
+        evDir := 1
+        evLvl := pLvl
+        evLvlBar := pBar
+        startBar := pBar
+else
+    if close > tLvl
+        evKind := 1
+        evDir := 1
+        evLvl := tLvl
+        evLvlBar := tBar
+        startBar := tBar
+    else if not na(pLvl) and close < pLvl
+        evKind := 2
+        evDir := -1
+        evLvl := pLvl
+        evLvlBar := pBar
+        startBar := pBar
+float ext = na
+int extBar = na
+if evKind != 0
+    // origine de la nouvelle marche = extrême opposé depuis le niveau cassé (R# pour une continuation)
+    int back = math.max(0, math.min(bar_index - startBar, 300))
+    ext := evDir == 1 ? low : high
+    extBar := bar_index
+    for k = 0 to back
+        if evDir == 1 and low[k] < ext
+            ext := low[k]
+            extBar := bar_index - k
+        if evDir == -1 and high[k] > ext
+            ext := high[k]
+            extBar := bar_index - k
+    zT := evKind == 1 ? 1 : zT + 1
+    zDir := evDir
+    tLvl := ext
+    tBar := extBar
+    pLvl := na
+    pBar := na
+var line protLine = na
+if evKind != 0 and showStair
+    string nm = evKind == 1 ? (evDir == 1 ? "CDLs" : "CDSs") : (evDir == 1 ? "LDs" : "SDs") + str.tostring(zT - 1)
+    line.new(evLvlBar, evLvl, bar_index, evLvl, color=color.fuchsia, style=line.style_dashed)
+    label.new(bar_index, evDir == 1 ? high : low, nm + (zT >= 3 ? " ★" : "") + " · T" + str.tostring(zT), style=evDir == 1 ? label.style_label_down : label.style_label_up, color=color.new(color.white, 100), textcolor=zT >= 3 ? color.fuchsia : (evDir == 1 ? color.green : color.red), size=size.small)
+    label.new(extBar, ext, evKind == 1 ? "T1" : "R" + str.tostring(zT - 1), style=evDir == 1 ? label.style_label_up : label.style_label_down, color=color.new(color.white, 100), textcolor=color.black, size=size.tiny)
+    line.delete(protLine)
+    protLine := line.new(extBar, ext, bar_index + 5, ext, color=color.fuchsia, style=line.style_dotted, width=2, extend=extend.right)
+alertcondition(evKind == 2 and zT >= 3, "Marche T3+ (setup Z)", "MNQ : marche T3+ — la tendance a battu l'autre côté trois fois")
+
+// ───────── Boîtes de session BZ + balance control (1/3 – 2/3) + vPOC approximatif
+mDay = hour(time, tz) * 60 + minute(time, tz)
+isOpen = mDay == 18 * 60 or mDay == 2 * 60 or mDay == 9 * 60 + 30
+tfMin = timeframe.in_seconds() / 60
+nBars = math.max(1, int(math.round(openMins / tfMin)))
+var box   bz = na
+var line  l23 = na
+var line  l13 = na
+var line  lPoc = na
+var float bzT = na
+var float bzB = na
+var int   built = 0
+var bool  bzLive = false
+var float pocV = 0.0
+var float pocP = na
+if showBZ and timeframe.isintraday and tfMin < 60 and isOpen
+    bzT := high
+    bzB := low
+    built := 1
+    bzLive := true
+    pocV := volume
+    pocP := hl2
+    bz := box.new(bar_index, bzT, bar_index, bzB, border_color=color.teal, bgcolor=color.new(color.teal, 92), text="BZ", text_color=color.teal, text_size=size.tiny, text_halign=text.align_left, text_valign=text.align_top)
+    l23 := line.new(bar_index, bzB, bar_index, bzB, color=color.green)
+    l13 := line.new(bar_index, bzB, bar_index, bzB, color=color.red)
+    lPoc := line.new(bar_index, hl2, bar_index, hl2, color=color.gray)
+else if bzLive
+    if built < nBars
+        bzT := math.max(bzT, high)
+        bzB := math.min(bzB, low)
+        built += 1
+        if volume > pocV
+            pocV := volume
+            pocP := hl2
+    else if close > bzT or close < bzB
+        bzLive := false
+        label.new(bar_index, close > bzT ? high : low, close > bzT ? "ZBrk▲" : "ZBrk▼", style=close > bzT ? label.style_label_down : label.style_label_up, color=color.new(color.white, 100), textcolor=close > bzT ? color.green : color.red, size=size.tiny)
+    float g = bzT - bzB
+    float t23 = bzB + g * 2 / 3
+    float t13 = bzB + g / 3
+    box.set_top(bz, bzT)
+    box.set_bottom(bz, bzB)
+    box.set_right(bz, bar_index)
+    line.set_xy1(l23, box.get_left(bz), t23)
+    line.set_xy2(l23, bar_index, t23)
+    line.set_xy1(l13, box.get_left(bz), t13)
+    line.set_xy2(l13, bar_index, t13)
+    line.set_xy1(lPoc, box.get_left(bz), pocP)
+    line.set_xy2(lPoc, bar_index, pocP)
+    line.set_width(l23, close >= t23 ? 3 : 1)
+    line.set_width(l13, close <= t13 ? 3 : 1)
+
+// ───────── Zone de pullback de la dernière bougie directionnelle
+var box pb = na
+if showPB and (bcUp or afUp or bcDn or afDn)
+    box.delete(pb)
+    float r = high - low
+    if bcUp or afUp
+        pb := box.new(bar_index, low + 0.875 * r, bar_index + 12, low + 0.75 * r, border_color=color.orange, bgcolor=color.new(color.orange, 85), text="P–MP", text_color=color.orange, text_size=size.tiny)
+    else
+        pb := box.new(bar_index, high - 0.25 * r, bar_index + 12, high - 0.5 * r, border_color=color.orange, bgcolor=color.new(color.orange, 85), text="BAL–MD", text_color=color.orange, text_size=size.tiny)
